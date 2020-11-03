@@ -74,6 +74,58 @@ def tensortoinputoutput(set,index):
         boolean=False
     return i,o,boolean
 
+
+supported_road_types = ['primary', 'secondary', 'trunk', 'trunk_link', 'primary_link', 'secondary_link']
+supported_road_types_dict = {type: idx for idx, type in enumerate(supported_road_types)}
+onehots = {idx:[1 if idx == n else 0 for n in range(len(supported_road_types))] for idx in range(len(supported_road_types))}
+from itertools import chain
+
+def type_to_one_hot(type: str):
+    return onehots[supported_road_types_dict[type.lower()]]
+
+
+def type_to_float_idx(type: str):
+    return float(supported_road_types_dict[type.lower()])
+
+
+
+def calc_node_pos(dataframe: pd.DataFrame):
+    new_frame = dataframe.copy()
+    col_lat = dataframe.loc[:, ['latStart', 'latEnd']]
+    col_lon = dataframe.loc[:, ['lonStart', 'lonEnd']]
+    new_frame['mean_lat'] = col_lat.mean(axis=1)
+    new_frame['mean_lon'] = col_lon.mean(axis=1)
+    return new_frame
+
+
+def generate_graph_nodes_roads(graph_data_frame: pd.DataFrame, include_all=False, color=False):
+    if not include_all:
+        search = ['primary', 'secondary', 'trunk']  # ,'tertiary'
+        found = [graph_data_frame['type'].str.contains(x) for x in search]
+        found = found[0] | found[1] | found[2]
+        graph_data_frame = graph_data_frame[found]
+
+    traffic_graph = nx.Graph()
+    graph_data_frame = calc_node_pos(graph_data_frame)
+
+    for _, values in graph_data_frame.iterrows():
+        attributes = {'max_speed': values['maxSpeed'],
+                      'distance': values['distance'],
+                      'type': type_to_float_idx(values['type']),
+                      'pos': [values['mean_lon'], values['mean_lat']]}
+        traffic_graph.add_node(values['edgeId'], **attributes)
+
+    for _, values in graph_data_frame.iterrows():
+        start_of_road = values['startNode']
+        end_of_road = values['endNode']
+        node_id = values['edgeId']
+        iterable = [['startNode', 'endNode', 'endNode', 'startNode'],
+                    [end_of_road, end_of_road, start_of_road, start_of_road]]
+        neighbours = [list(graph_data_frame[graph_data_frame[x] == y]['edgeId'].values) for x, y in zip(*iterable)]
+        neighbours = list(set(chain(*neighbours)))
+        for neighbour in neighbours:
+            traffic_graph.add_edge(node_id, neighbour)
+    return traffic_graph
 # class GCNConv(MessagePassing):
 #     def __init__(self, in_channels, out_channels):
 #         super(GCNConv, self).__init__(aggr='add')
@@ -103,8 +155,8 @@ def tensortoinputoutput(set,index):
 class Net(torch.nn.Module):
     def __init__(self, input_nodes,output_size,hidden_size):
         super(Net, self).__init__()
-        self.conv1 = GCNConv(input_nodes, hidden_size)
-        self.conv2 = GCNConv(hidden_size, output_size)
+        self.conv1 = GCNConv(1, hidden_size)
+        self.conv2 = GCNConv(hidden_size, 1)
 
     def forward(self, x,edge_index):
         #edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
@@ -121,8 +173,9 @@ def train(set):
             input=input.cuda()
             target=target.cuda()
             model.zero_grad()
+            input = torch.unsqueeze(input, -1).float().cuda()
             output = model(input.float(), edge_index=sparse_adj_in_coo_format_tensor)
-            loss = criterion(output,target)
+            loss = criterion(output.view(-1),target)
             loss.backward()
 
             for p in model.parameters():
@@ -169,21 +222,23 @@ if __name__ == '__main__':
     avg_speed = convert_index_to_datetime(avg_speed)
     c=speedtocolor("2016-10-01T00:50:00")
     # print(c)
-
-    G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
+    G = generate_graph_nodes_roads(data)
+    # G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
 
     # Plot it
-    nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
+    # nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
     # plt.show()
     # adj=nx.adjacency_matrix(G)
-    adj = nx.adjacency_matrix(G).toarray()
+    adj = nx.to_pandas_adjacency(G)
+    road_order = [str(x) for x in list(G.nodes)]
 
+    avg_speed = avg_speed[road_order]
     # eventueel hiervoor al self loops introduceren
 
 
     sparse_adj = nx.to_scipy_sparse_matrix(G).tocoo()
     sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
-    sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long)
+    sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
     # adj=adj.tocoo()
     # adj = torch.sparse.LongTensor(torch.LongTensor([adj.row.tolist(), adj.col.tolist()]),
     #                               torch.LongTensor(adj.data.astype(np.int32)))
