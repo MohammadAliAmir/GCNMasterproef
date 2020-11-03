@@ -8,13 +8,13 @@ from torch_geometric.nn import GCNConv
 
 np.random.seed(42)
 def loaddata():
-    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
+    Location = 'graphwithwayid.csv'
     # Location = r'graphwithwayid.csv'
     df = pd.read_csv(Location)
     return df
 
 def loadavgspeed():
-    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv'
+    Location = 'avg_speed.csv'
     # Location = r'avg_speed.csv'
     df = pd.read_csv(Location, sep=';')
     return df
@@ -73,7 +73,29 @@ def tensortoinputoutput(set,index):
         o=torch.tensor(set[index+1].values)
         boolean=False
     return i,o,boolean
-
+def generate_graph_nodes_junctions(graph_data_frame: pd.DataFrame, include_all=False, color=False):
+    if not include_all:
+        search = ['primary', 'secondary', 'trunk']  # ,'tertiary'
+        found = [graph_data_frame['type'].str.contains(x) for x in search]
+        found = found[0] | found[1] | found[2]
+        graph_data_frame = graph_data_frame[found]
+    directional_graph = nx.MultiDiGraph()
+    start_nodes = graph_data_frame[['startNode', 'latStart', 'lonStart']]
+    start_nodes.columns = ['Node', 'Lat', 'Lon']
+    end_nodes = graph_data_frame[['endNode', 'latEnd', 'lonEnd']]
+    end_nodes.columns = start_nodes.columns
+    all_nodes = pd.concat([start_nodes, end_nodes], axis=0).drop_duplicates('Node')
+    all_nodes.index = all_nodes['Node']
+    all_nodes = all_nodes.drop('Node', axis=1)
+    for node, values in all_nodes.iterrows():
+        directional_graph.add_node(node, pos=[values['Lon'], values['Lat']])
+    for index, row in graph_data_frame.iterrows():
+        if color:
+            directional_graph.add_edge(row['startNode'], row['endNode'], data={'sectionId': row.name},
+                                       color=row['cluster_color'])
+        else:
+            directional_graph.add_edge(row['startNode'], row['endNode'], data={'sectionId': row.name})
+    return directional_graph
 # class GCNConv(MessagePassing):
 #     def __init__(self, in_channels, out_channels):
 #         super(GCNConv, self).__init__(aggr='add')
@@ -165,12 +187,12 @@ if __name__ == '__main__':
     # nx.draw(G,pos=pos,node_size=5,width=widths,edge_color=colors, with_labels=False)
     # plt.show(
 
-    avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';', index_col=0)
+    avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
     avg_speed = convert_index_to_datetime(avg_speed)
     c=speedtocolor("2016-10-01T00:50:00")
     # print(c)
-
-    G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
+    G = generate_graph_nodes_junctions(data)
+    # G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
 
     # Plot it
     nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
