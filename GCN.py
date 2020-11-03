@@ -8,17 +8,22 @@ from torch_geometric.nn import GCNConv
 
 np.random.seed(42)
 def loaddata():
-    Location = r'graphwithwayid.csv'
+    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
+    # Location = r'graphwithwayid.csv'
     df = pd.read_csv(Location)
     return df
+
 def loadavgspeed():
-    Location = r'avg_speed.csv'
-    df = pd.read_csv(Location)
+    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv'
+    # Location = r'avg_speed.csv'
+    df = pd.read_csv(Location, sep=';')
     return df
+
 def convert_index_to_datetime(feature):
         indices = pd.to_datetime(feature.index)
         feature.index = indices
         return feature
+
 def preprocess_adj(A):
     '''
     Pre-process adjacency matrix
@@ -102,7 +107,7 @@ class Net(torch.nn.Module):
         self.conv2 = GCNConv(hidden_size, output_size)
 
     def forward(self, x,edge_index):
-        edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
+        #edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
@@ -116,7 +121,7 @@ def train(set):
             input=input.cuda()
             target=target.cuda()
             model.zero_grad()
-            output = model(input.float(),adj)
+            output = model(input.float(), edge_index=sparse_adj_in_coo_format_tensor)
             loss = criterion(output,target)
             loss.backward()
 
@@ -124,6 +129,7 @@ def train(set):
                 p.data.add_(p.grad.data, alpha=-learning_rate)
 
     return output , loss.item()
+
 if __name__ == '__main__':
     data=loaddata()
     # data.itertuples(index=False,)
@@ -159,18 +165,25 @@ if __name__ == '__main__':
     # nx.draw(G,pos=pos,node_size=5,width=widths,edge_color=colors, with_labels=False)
     # plt.show(
 
-    avg_speed = pd.read_csv("avg_speed.csv", sep=',', index_col=0)
+    avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';', index_col=0)
     avg_speed = convert_index_to_datetime(avg_speed)
     c=speedtocolor("2016-10-01T00:50:00")
     # print(c)
 
-    G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True)
+    G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
 
     # Plot it
     nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
     # plt.show()
     # adj=nx.adjacency_matrix(G)
     adj = nx.adjacency_matrix(G).toarray()
+
+    # eventueel hiervoor al self loops introduceren
+
+
+    sparse_adj = nx.to_scipy_sparse_matrix(G).tocoo()
+    sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
+    sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long)
     # adj=adj.tocoo()
     # adj = torch.sparse.LongTensor(torch.LongTensor([adj.row.tolist(), adj.col.tolist()]),
     #                               torch.LongTensor(adj.data.astype(np.int32)))
