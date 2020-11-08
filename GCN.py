@@ -4,19 +4,20 @@ import networkx as nx
 import torch.nn.functional as F
 import torch.nn as nn
 from torch_geometric.nn import GCNConv
+import random
 
 
 np.random.seed(42)
 def loaddata():
-    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
-    # Location = r'graphwithwayid.csv'
+    # Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
+    Location = r'graphwithwayid.csv'
     df = pd.read_csv(Location)
     return df
 
 def loadavgspeed():
-    Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv'
-    # Location = r'avg_speed.csv'
-    df = pd.read_csv(Location, sep=';')
+    # Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv'
+    Location = r'avg_speed.csv'
+    df = pd.read_csv(Location, sep=',')
     return df
 
 def convert_index_to_datetime(feature):
@@ -62,18 +63,17 @@ def speedtocolor(date):
 def dataframetotensor(df):
     tensor=[]
     for index, row in df.iterrows():
-        tensor.append(row)
+        tensor.append(torch.tensor(row.values))
     return tensor
 def tensortoinputoutput(set,index):
     i=torch.zeros(2)
     o=torch.zeros(2)
     boolean=True
-    if len(set)>=index+1:
-        i=torch.tensor(set[index].values)
-        o=torch.tensor(set[index+1].values)
+    if len(set)>index+1:
+        i=set[index]
+        o=set[index+1]
         boolean=False
     return i,o,boolean
-
 
 supported_road_types = ['primary', 'secondary', 'trunk', 'trunk_link', 'primary_link', 'secondary_link']
 supported_road_types_dict = {type: idx for idx, type in enumerate(supported_road_types)}
@@ -87,6 +87,12 @@ def type_to_one_hot(type: str):
 def type_to_float_idx(type: str):
     return float(supported_road_types_dict[type.lower()])
 
+def savemodel(model):
+    torch.save(model.state_dict(), './GCNModel.ckpt')
+
+def loadmodel(m):
+    m.load_state_dict(torch.load('./GCNModel.ckpt'))
+    return m
 
 
 def calc_node_pos(dataframe: pd.DataFrame):
@@ -160,6 +166,7 @@ class Net(torch.nn.Module):
 
     def forward(self, x,edge_index):
         #edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
+        x=x.double()
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
@@ -167,28 +174,49 @@ class Net(torch.nn.Module):
 
         return F.log_softmax(x, dim=1)
 def train(set):
+    model.train()
+    print("In training")
+    epoch_losses=[]
     for t in range(len(set)):
         input , target , IsEnd= tensortoinputoutput(set,t)
         if not IsEnd:
             input=input.cuda()
             target=target.cuda()
             model.zero_grad()
-            input = torch.unsqueeze(input, -1).float().cuda()
-            output = model(input.float(), edge_index=sparse_adj_in_coo_format_tensor)
-            loss = criterion(output.view(-1),target)
+            input = torch.unsqueeze(input, -1).double().cuda()
+            output = model(input, edge_index=sparse_adj_in_coo_format_tensor)
+            loss = criterion(output.view(-1),target).double()
             loss.backward()
+            print("Loss: " + str(loss.item()))
+            epoch_losses.append(loss.item())
 
             for p in model.parameters():
                 p.data.add_(p.grad.data, alpha=-learning_rate)
 
-    return output , loss.item()
+    return output , epoch_losses
+
+def evaluate(set):
+    val_input, val_target, isEnd = tensortoinputoutput(set,random.randrange(0,len(set)-2))
+    val_input=val_input.to(device)
+    val_target=val_target.to(device)
+    val_input=torch.unsqueeze(val_input,-1).double()
+    output=model(val_input,edge_index=sparse_adj_in_coo_format_tensor)
+    val_loss=criterion(output.view(-1),val_target).double()
+    print("Validation Loss: "+str(val_loss.item()))
+    return val_loss.item()
 
 if __name__ == '__main__':
+
+    #Load data
     data=loaddata()
-    # data.itertuples(index=False,)
+    avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
+    avg_speed = convert_index_to_datetime(avg_speed)
+
     pos={}
     colors=[]
     widths=[]
+
+    #Initial graph drawing parameters
     for index, row in data.iterrows():
         pos.update( {row.startNode : (row.lonStart,row.latStart)})
         pos.update({row.endNode : (row.lonEnd,row.latEnd)})
@@ -211,31 +239,20 @@ if __name__ == '__main__':
         else:
             widths.append(0.75)
 
-    # G = nx.from_pandas_edgelist(data, source='startNode', target='endNode',edge_attr=True)
-    #
-    #
-    # # Plot it
-    # nx.draw(G,pos=pos,node_size=5,width=widths,edge_color=colors, with_labels=False)
-    # plt.show(
-
-    avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';', index_col=0)
-    avg_speed = convert_index_to_datetime(avg_speed)
-    c=speedtocolor("2016-10-01T00:50:00")
-    # print(c)
+    #Generate graph
     G = generate_graph_nodes_roads(data)
-    # G = nx.from_pandas_edgelist(data, source='startNode', target='endNode', edge_attr=True, create_using=nx.DiGraph)
-
-    # Plot it
+    #Update colors
+    c=speedtocolor("2016-10-01T00:50:00")
+    # Plot graph
     # nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
     # plt.show()
-    # adj=nx.adjacency_matrix(G)
-    adj = nx.to_pandas_adjacency(G)
-    road_order = [str(x) for x in list(G.nodes)]
 
+    #Sort speed data to road order
+    road_order = [str(x) for x in list(G.nodes)]
     avg_speed = avg_speed[road_order]
     # eventueel hiervoor al self loops introduceren
 
-
+    #Get Adjacency Matrix
     sparse_adj = nx.to_scipy_sparse_matrix(G).tocoo()
     sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
     sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
@@ -243,29 +260,50 @@ if __name__ == '__main__':
     # adj = torch.sparse.LongTensor(torch.LongTensor([adj.row.tolist(), adj.col.tolist()]),
     #                               torch.LongTensor(adj.data.astype(np.int32)))
     # adj_tensor = torch.tensor(adj)
-    tensors=[]
-    for index, row in avg_speed.iterrows():
-        tensors.append(row.values)
-        inputsize=len(row)
+
+    #Define training and test set
     trainingset=avg_speed.loc["2016-10-01":"2016-11-01"]
     trainingtensor=dataframetotensor(trainingset)
+    testset=avg_speed.loc["2016-11-07":"2016-11-14"]
+    testtensor=dataframetotensor(testset)
+    valset=avg_speed.loc["2016-11-18":"2016-11-19"]
+    valtensor=dataframetotensor(valset)
 
+    #Initialize model
+    inputsize = avg_speed.shape[1]
+    training_losses=[]
+    val_losses=[]
     learning_rate=0.01
+    accuracy_check=2
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = Net(inputsize,inputsize,inputsize).to(device)
-    model=model.float()
+    model=model.double()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)
-    criterion = nn.MSELoss()
+    criterion = nn.MSELoss().cuda()
 
-    training_losses=[]
+
+    #Start training
+    print("Start training")
     model.train()
-    for epoch in range(200):
+    for epoch in range(15):
+        print("Epoch: " + str(epoch))
         optimizer.zero_grad()
-        out = train(trainingtensor)
+        out,epoch_loss = train(trainingtensor)
+        training_losses.append(epoch_loss)
         # loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
         # loss.backward()
         optimizer.step()
+        if (epoch % accuracy_check ==0):
+            print("Evaluate")
+            with torch.no_grad():
+                model.eval()
+                validation_loss=evaluate(valtensor)
+                val_losses.append(validation_loss)
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), 'checkpoint/epoch_' + str(epoch) + '.tar')
 
+    #Save model after training
+    savemodel(model)
 
 
 
