@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import matplotlib.pyplot as plt
+from torch_geometric.data import Data, Batch, DataLoader
 
 
 def dicttotensor(d):
@@ -23,15 +24,14 @@ class Net(torch.nn.Module):
         self.conv1 = GCNConv(1, hidden_size)
         self.conv2 = GCNConv(hidden_size, 1)
 
-    def forward(self, x, edge_index):
-        # edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
-        x = x.double()
+    def forward(self, sample):
+        x, edge_index = sample.x, sample.edge_index
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
         x = self.conv2(x, edge_index)
 
-        return F.log_softmax(x, dim=1)
+        return x #  F.log_softmax(x, dim=0)
 
 
 nodes = np.arange(5)
@@ -54,32 +54,47 @@ sparse_adj = nx.to_scipy_sparse_matrix(graph).tocoo()
 sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
 sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
 
-training_tensors = dicttotensor(data)
-val_tensors = dicttotensor(val_data)
-model = Net(training_tensors[0].shape[0])
-learning_rate = 1e-3
+frame_data = pd.DataFrame.from_dict(data)
+data_graphs = []
+for i in range(len(frame_data)-1):
+    x = torch.tensor([frame_data.iloc[i]], dtype=torch.double).cuda()
+    x = x.permute(1, 0)  # nodes, features
+    y = torch.tensor([frame_data.iloc[i+1]], dtype=torch.double).cuda()
+    y = y.permute(1, 0)  # nodes, features
+    data_entry = Data(x=x, y=y, edge_index=sparse_adj_in_coo_format_tensor)
+    data_graphs.append(data_entry)
+loader = DataLoader(data_graphs, batch_size=1)
+
+
+#training_tensors = dicttotensor(data)
+#val_tensors = dicttotensor(val_data)
+model = Net(data_graphs[0]['x'].shape[0])
+learning_rate = 1e-4
 model = model.double().cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)
 criterion = nn.MSELoss().cuda()
+
+
+
 model.train()
 
-epoch_losses = []
+epoch_losses = 0
 for epoch in range(1000):
-    for i in range(len(training_tensors)):
-        if i + 1 < len(training_tensors):
-            input = training_tensors[i].double().cuda()
-            target = training_tensors[i + 1].double().cuda()
-            output = model(input, sparse_adj_in_coo_format_tensor).double().cuda()
-            # t_output=output.view(-1)
-            loss = criterion(output, target)
-            loss.backward()
-            print(loss.item())
-            epoch_losses.append(loss.item())
+    for data_entry in loader:
+        output = model(data_entry)
+        # t_output=output.view(-1)
+        loss = criterion(output, data_entry.y)
+        loss.backward()
+        optimizer.step()
+        #print(loss.item())
+        epoch_losses += loss
 
-            for p in model.parameters():
-                p.data.add_(p.grad.data, alpha=-learning_rate)
+        # for p in model.parameters():
+        #     p.data.add_(p.grad.data, alpha=-learning_rate)
+    print(epoch_losses)
+    epoch_losses = 0
 
-    optimizer.step()
+
 model.eval()
 with torch.no_grad():
     val_input = val_tensors[0].double().cuda()
