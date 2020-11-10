@@ -5,6 +5,9 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import random
+from stgcn import STGCN
+from torch_geometric.data import Data, Batch, DataLoader
+import datetime
 
 
 np.random.seed(42)
@@ -24,6 +27,22 @@ def convert_index_to_datetime(feature):
         indices = pd.to_datetime(feature.index)
         feature.index = indices
         return feature
+def df_to_data(df):
+    data_graphs=[]
+    # timedelta = datetime.timedelta(minutes=5)
+    for i in range(len(df)-1):
+        # j=i.to_pydatetime()
+        # next=j+timedelta
+        x = torch.tensor([df.iloc[i]], dtype=torch.double).cuda()
+        x=torch.transpose(x,0,1)
+        # x = x.permute(df.shape[1], 1)  # nodes, features
+        y = torch.tensor([df.iloc[i+1]], dtype=torch.double).cuda()
+        y = torch.transpose(y, 0, 1)
+        # y = y.permute(df.shape[1], 1)  # nodes, features
+        data_entry = Data(x=x, y=y, edge_index=sparse_adj_in_coo_format_tensor)
+        data_graphs.append(data_entry)
+    loader = DataLoader(data_entry,batch_size=1)
+    return loader, data_graphs
 
 def preprocess_adj(A):
     '''
@@ -63,7 +82,9 @@ def speedtocolor(date):
 def dataframetotensor(df):
     tensor=[]
     for index, row in df.iterrows():
-        tensor.append(torch.tensor(row.values))
+        t=torch.tensor((row.values))
+        t=torch.unsqueeze(t,-1)
+        tensor.append(t)
     return tensor
 def tensortoinputoutput(set,index):
     i=torch.zeros(2)
@@ -159,50 +180,57 @@ def generate_graph_nodes_roads(graph_data_frame: pd.DataFrame, include_all=False
 #         return norm.view(-1, 1) * x_j
 
 class Net(torch.nn.Module):
-    def __init__(self, input_nodes,output_size,hidden_size):
+    def __init__(self, hidden_size):
         super(Net, self).__init__()
         self.conv1 = GCNConv(1, hidden_size)
         self.conv2 = GCNConv(hidden_size, 1)
 
-    def forward(self, x,edge_index):
-        #edge_index = torch.from_numpy(preprocess_adj(edge_index)).float()
-        x=x.double()
+    def forward(self, sample):
+        x, edge_index = sample.x, sample.edge_index
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
         x = self.conv2(x, edge_index)
 
-        return F.log_softmax(x, dim=1)
-def train(set):
+        return x #  F.log_softmax(x, dim=0)
+def train(loader):
     model.train()
     print("In training")
-    epoch_losses=[]
-    for t in range(len(set)):
-        input , target , IsEnd= tensortoinputoutput(set,t)
-        if not IsEnd:
-            input=input.cuda()
-            target=target.cuda()
-            model.zero_grad()
-            input = torch.unsqueeze(input, -1).double().cuda()
-            output = model(input, edge_index=sparse_adj_in_coo_format_tensor)
-            loss = criterion(output.view(-1),target).double()
-            loss.backward()
-            print("Loss: " + str(loss.item()))
-            epoch_losses.append(loss.item())
 
-            for p in model.parameters():
-                p.data.add_(p.grad.data, alpha=-learning_rate)
+    epoch_losses=[]
+    for x,y,edge_index in loader:
+        print(" ")
+        # input , target , IsEnd= tensortoinputoutput(set,t)
+        # if not IsEnd:
+
+        # permutation = torch.randperm(len(input))
+        # for i in range(0,input.shape[0],batch_size):
+        #     indices = permutation[t:t + batch_size]
+
+        # input=input[indices].cuda()
+        # target=target[indices].cuda()
+        model.zero_grad()
+        # input = torch.unsqueeze(input, -1).double().cuda()
+        output = model(d)
+        loss = criterion(output,entry.y).double()
+        loss.backward()
+        print("Loss: " + str(loss.item()))
+        epoch_losses.append(loss.item())
+
+        for p in model.parameters():
+            p.data.add_(p.grad.data, alpha=-learning_rate)
 
     return output , epoch_losses
 
 def evaluate(set):
-    val_input, val_target, isEnd = tensortoinputoutput(set,random.randrange(0,len(set)-2))
-    val_input=val_input.to(device)
-    val_target=val_target.to(device)
-    val_input=torch.unsqueeze(val_input,-1).double()
-    output=model(val_input,edge_index=sparse_adj_in_coo_format_tensor)
-    val_loss=criterion(output.view(-1),val_target).double()
-    print("Validation Loss: "+str(val_loss.item()))
+    for entry in set:
+        # val_input, val_target, isEnd = tensortoinputoutput(set,random.randrange(0,len(set)-2))
+        # val_input=val_input.to(device)
+        # val_target=val_target.to(device)
+        # val_input=torch.unsqueeze(val_input,-1).double()
+        output=model(entry)
+        val_loss=criterion(output.view(-1),entry.y).double()
+        print("Validation Loss: "+str(val_loss.item()))
     return val_loss.item()
 
 if __name__ == '__main__':
@@ -263,20 +291,26 @@ if __name__ == '__main__':
 
     #Define training and test set
     trainingset=avg_speed.loc["2016-10-01":"2016-11-01"]
+    train_data, train_graph = df_to_data(trainingset)
     trainingtensor=dataframetotensor(trainingset)
     testset=avg_speed.loc["2016-11-07":"2016-11-14"]
+    test_data, test_graph = df_to_data(testset)
     testtensor=dataframetotensor(testset)
     valset=avg_speed.loc["2016-11-18":"2016-11-19"]
+    val_data, val_graph= df_to_data(valset)
     valtensor=dataframetotensor(valset)
 
     #Initialize model
     inputsize = avg_speed.shape[1]
     training_losses=[]
     val_losses=[]
-    learning_rate=0.01
+    learning_rate= 1e-4
     accuracy_check=2
+    # batch_size=50
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = Net(inputsize,inputsize,inputsize).to(device)
+    model = Net(train_graph[0]['x'].shape[0]).to(device)
+    # model = Net(batch_size).to(device)
+    # model = STGCN(inputsize,1,1,1)
     model=model.double()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)
     criterion = nn.MSELoss().cuda()
@@ -288,7 +322,7 @@ if __name__ == '__main__':
     for epoch in range(15):
         print("Epoch: " + str(epoch))
         optimizer.zero_grad()
-        out,epoch_loss = train(trainingtensor)
+        out,epoch_loss = train(train_data)
         training_losses.append(epoch_loss)
         # loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
         # loss.backward()
@@ -297,7 +331,7 @@ if __name__ == '__main__':
             print("Evaluate")
             with torch.no_grad():
                 model.eval()
-                validation_loss=evaluate(valtensor)
+                validation_loss=evaluate(val_data)
                 val_losses.append(validation_loss)
         if epoch % 5 == 0:
             torch.save(model.state_dict(), 'checkpoint/epoch_' + str(epoch) + '.tar')

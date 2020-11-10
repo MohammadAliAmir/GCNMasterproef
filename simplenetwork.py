@@ -55,6 +55,7 @@ sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
 sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
 
 frame_data = pd.DataFrame.from_dict(data)
+valframe= pd.DataFrame.from_dict(val_data)
 data_graphs = []
 for i in range(len(frame_data)-1):
     x = torch.tensor([frame_data.iloc[i]], dtype=torch.double).cuda()
@@ -64,6 +65,15 @@ for i in range(len(frame_data)-1):
     data_entry = Data(x=x, y=y, edge_index=sparse_adj_in_coo_format_tensor)
     data_graphs.append(data_entry)
 loader = DataLoader(data_graphs, batch_size=1)
+val_graphs=[]
+for i in range(len(valframe)-1):
+    x= torch.tensor([valframe.iloc[i]], dtype=torch.double).cuda()
+    x=x.permute(1,0)
+    y= torch.tensor([valframe.iloc[i]],dtype=torch.double).cuda()
+    y=y.permute(1,0)
+    val_data_entry = Data(x=x, y=y,edge_index=sparse_adj_in_coo_format_tensor)
+    val_graphs.append(val_data_entry)
+val_loader=DataLoader(val_graphs,batch_size=1)
 
 
 #training_tensors = dicttotensor(data)
@@ -97,8 +107,9 @@ for epoch in range(1000):
 
 model.eval()
 with torch.no_grad():
-    val_input = val_tensors[0].double().cuda()
-    val_target = val_tensors[1].double().cuda()
-    val_output = model(val_input, sparse_adj_in_coo_format_tensor)
-    val_loss = criterion(val_output, val_target)
-    print("Loss: " + str(val_loss.item()))
+    for val_data_entry in val_loader:
+        # val_input = val_tensors[0].double().cuda()
+        # val_target = val_tensors[1].double().cuda()
+        val_output = model(val_data_entry, sparse_adj_in_coo_format_tensor)
+        val_loss = criterion(val_output, val_data_entry.y)
+        print("Loss: " + str(val_loss.item()))
