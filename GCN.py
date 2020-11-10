@@ -5,15 +5,19 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import random
-from stgcn import STGCN
+import os
+
 from torch_geometric.data import Data, Batch, DataLoader
 import datetime
 
 
 np.random.seed(42)
 def loaddata():
-    # Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
-    Location = r'graphwithwayid.csv'
+    if os.path.exists(r'graphwithwayid.csv'):
+        Location = r'graphwithwayid.csv'
+    else:
+        Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/graph_withWayId_StreetType_CorrectDirs.csv'
+
     df = pd.read_csv(Location)
     return df
 
@@ -41,7 +45,7 @@ def df_to_data(df):
         # y = y.permute(df.shape[1], 1)  # nodes, features
         data_entry = Data(x=x, y=y, edge_index=sparse_adj_in_coo_format_tensor)
         data_graphs.append(data_entry)
-    loader = DataLoader(data_entry,batch_size=1)
+    loader = DataLoader(data_graphs,batch_size=1)
     return loader, data_graphs
 
 def preprocess_adj(A):
@@ -198,7 +202,7 @@ def train(loader):
     print("In training")
 
     epoch_losses=[]
-    for x,y,edge_index in loader:
+    for data_graph in loader:
         print(" ")
         # input , target , IsEnd= tensortoinputoutput(set,t)
         # if not IsEnd:
@@ -211,8 +215,8 @@ def train(loader):
         # target=target[indices].cuda()
         model.zero_grad()
         # input = torch.unsqueeze(input, -1).double().cuda()
-        output = model(d)
-        loss = criterion(output,entry.y).double()
+        output = model(data_graph)
+        loss = criterion(output,data_graph.y).double()
         loss.backward()
         print("Loss: " + str(loss.item()))
         epoch_losses.append(loss.item())
@@ -237,7 +241,10 @@ if __name__ == '__main__':
 
     #Load data
     data=loaddata()
-    avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
+    if os.path.isfile('avg_speed.csv'):
+        avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
+    else:
+        avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';', index_col=0)
     avg_speed = convert_index_to_datetime(avg_speed)
 
     pos={}
