@@ -6,10 +6,13 @@ import torch.nn as nn
 from torch_geometric.nn import GCNConv
 import random
 import os
-
+from sklearn import preprocessing
+import matplotlib.pyplot as plt
 from torch_geometric.data import Data, Batch, DataLoader
-import datetime
-
+from torch.utils.tensorboard import SummaryWriter
+import torch,lib
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import add_self_loops, degree
 
 np.random.seed(42)
 def loaddata():
@@ -21,96 +24,15 @@ def loaddata():
     df = pd.read_csv(Location)
     return df
 
-def loadavgspeed():
-    # Location = 'E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv'
-    Location = r'avg_speed.csv'
-    df = pd.read_csv(Location, sep=',')
-    return df
-
-def convert_index_to_datetime(feature):
-        indices = pd.to_datetime(feature.index)
-        feature.index = indices
-        return feature
-def df_to_data(df):
-    data_graphs=[]
-    # timedelta = datetime.timedelta(minutes=5)
-    for i in range(len(df)-1):
-        # j=i.to_pydatetime()
-        # next=j+timedelta
-        x = torch.tensor([df.iloc[i]], dtype=torch.double).cuda()
-        x=torch.transpose(x,0,1)
-        # x = x.permute(df.shape[1], 1)  # nodes, features
-        y = torch.tensor([df.iloc[i+1]], dtype=torch.double).cuda()
-        y = torch.transpose(y, 0, 1)
-        # y = y.permute(df.shape[1], 1)  # nodes, features
-        data_entry = Data(x=x, y=y, edge_index=sparse_adj_in_coo_format_tensor)
-        data_graphs.append(data_entry)
-    loader = DataLoader(data_graphs,batch_size=1)
-    return loader, data_graphs
-
-def preprocess_adj(A):
-    '''
-    Pre-process adjacency matrix
-    :param A: adjacency matrix
-    :return:
-    '''
-    I = np.eye(A.shape[0])
-    A_hat = A + I # add self-loops
-    D_hat_diag = np.sum(A_hat, axis=1)
-    D_hat_diag_inv_sqrt = np.power(D_hat_diag, -0.5)
-    D_hat_diag_inv_sqrt[np.isinf(D_hat_diag_inv_sqrt)] = 0.
-    D_hat_inv_sqrt = np.diag(D_hat_diag_inv_sqrt)
-    return np.dot(np.dot(D_hat_inv_sqrt, A_hat), D_hat_inv_sqrt)
-
-import torch
-from torch_geometric.nn import MessagePassing
-from torch_geometric.utils import add_self_loops, degree
-def speedtocolor(date):
-    # speed=time_dict[date]
-    speed=avg_speed.loc[date]
-    keys=speed.keys()
-    colors1=[]
-    df=data['edgeId'].tolist()
-    for i in keys:
-        if int(i) in df:
-            j=speed.get(i)
-            if j>49:
-                colors1.append('green')
-            elif speed.get(i)>27:
-                colors1.append('orange')
-            elif speed.get(i)>=5:
-                colors1.append('red')
-            else:
-                colors1.append('k')
-    return colors1
-def dataframetotensor(df):
-    tensor=[]
-    for index, row in df.iterrows():
-        t=torch.tensor((row.values))
-        t=torch.unsqueeze(t,-1)
-        tensor.append(t)
-    return tensor
-def tensortoinputoutput(set,index):
-    i=torch.zeros(2)
-    o=torch.zeros(2)
-    boolean=True
-    if len(set)>index+1:
-        i=set[index]
-        o=set[index+1]
-        boolean=False
-    return i,o,boolean
-
-supported_road_types = ['primary', 'secondary', 'trunk', 'trunk_link', 'primary_link', 'secondary_link']
-supported_road_types_dict = {type: idx for idx, type in enumerate(supported_road_types)}
-onehots = {idx:[1 if idx == n else 0 for n in range(len(supported_road_types))] for idx in range(len(supported_road_types))}
-from itertools import chain
-
-def type_to_one_hot(type: str):
-    return onehots[supported_road_types_dict[type.lower()]]
+def load_avgspeed():
+    if os.path.isfile('avg_speed.csv'):
+        avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
+    else:
+        avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';',
+                                index_col=0)
+    return avg_speed
 
 
-def type_to_float_idx(type: str):
-    return float(supported_road_types_dict[type.lower()])
 
 def savemodel(model):
     torch.save(model.state_dict(), './GCNModel.ckpt')
@@ -118,45 +40,6 @@ def savemodel(model):
 def loadmodel(m):
     m.load_state_dict(torch.load('./GCNModel.ckpt'))
     return m
-
-
-def calc_node_pos(dataframe: pd.DataFrame):
-    new_frame = dataframe.copy()
-    col_lat = dataframe.loc[:, ['latStart', 'latEnd']]
-    col_lon = dataframe.loc[:, ['lonStart', 'lonEnd']]
-    new_frame['mean_lat'] = col_lat.mean(axis=1)
-    new_frame['mean_lon'] = col_lon.mean(axis=1)
-    return new_frame
-
-
-def generate_graph_nodes_roads(graph_data_frame: pd.DataFrame, include_all=False, color=False):
-    if not include_all:
-        search = ['primary', 'secondary', 'trunk']  # ,'tertiary'
-        found = [graph_data_frame['type'].str.contains(x) for x in search]
-        found = found[0] | found[1] | found[2]
-        graph_data_frame = graph_data_frame[found]
-
-    traffic_graph = nx.Graph()
-    graph_data_frame = calc_node_pos(graph_data_frame)
-
-    for _, values in graph_data_frame.iterrows():
-        attributes = {'max_speed': values['maxSpeed'],
-                      'distance': values['distance'],
-                      'type': type_to_float_idx(values['type']),
-                      'pos': [values['mean_lon'], values['mean_lat']]}
-        traffic_graph.add_node(values['edgeId'], **attributes)
-
-    for _, values in graph_data_frame.iterrows():
-        start_of_road = values['startNode']
-        end_of_road = values['endNode']
-        node_id = values['edgeId']
-        iterable = [['startNode', 'endNode', 'endNode', 'startNode'],
-                    [end_of_road, end_of_road, start_of_road, start_of_road]]
-        neighbours = [list(graph_data_frame[graph_data_frame[x] == y]['edgeId'].values) for x, y in zip(*iterable)]
-        neighbours = list(set(chain(*neighbours)))
-        for neighbour in neighbours:
-            traffic_graph.add_edge(node_id, neighbour)
-    return traffic_graph
 # class GCNConv(MessagePassing):
 #     def __init__(self, in_channels, out_channels):
 #         super(GCNConv, self).__init__(aggr='add')
@@ -190,7 +73,7 @@ class Net(torch.nn.Module):
         self.conv2 = GCNConv(hidden_size, 1)
 
     def forward(self, sample):
-        x, edge_index = sample.x, sample.edge_index
+        x, edge_index = sample.x.double(), sample.edge_index
         x = self.conv1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
@@ -204,17 +87,7 @@ def train(loader):
     epoch_losses=[]
     for data_graph in loader:
         print(" ")
-        # input , target , IsEnd= tensortoinputoutput(set,t)
-        # if not IsEnd:
-
-        # permutation = torch.randperm(len(input))
-        # for i in range(0,input.shape[0],batch_size):
-        #     indices = permutation[t:t + batch_size]
-
-        # input=input[indices].cuda()
-        # target=target[indices].cuda()
         model.zero_grad()
-        # input = torch.unsqueeze(input, -1).double().cuda()
         output = model(data_graph)
         loss = criterion(output,data_graph.y).double()
         loss.backward()
@@ -224,60 +97,39 @@ def train(loader):
         for p in model.parameters():
             p.data.add_(p.grad.data, alpha=-learning_rate)
 
-    return output , epoch_losses
+    return output , sum(epoch_losses)/len(epoch_losses)
 
 def evaluate(set):
+    val_outputs=[]
+    losses=[]
     for entry in set:
-        # val_input, val_target, isEnd = tensortoinputoutput(set,random.randrange(0,len(set)-2))
-        # val_input=val_input.to(device)
-        # val_target=val_target.to(device)
-        # val_input=torch.unsqueeze(val_input,-1).double()
         output=model(entry)
-        val_loss=criterion(output.view(-1),entry.y).double()
+        target=entry.y
+        val_loss=criterion(output,target).double()
+        val_outputs.append(output)
         print("Validation Loss: "+str(val_loss.item()))
-    return val_loss.item()
+        losses.append(val_loss)
+
+    return sum(losses)/len(losses)
+
+
 
 if __name__ == '__main__':
 
+    #Logger
+    writer = SummaryWriter()
+
     #Load data
     data=loaddata()
-    if os.path.isfile('avg_speed.csv'):
-        avg_speed = pd.read_csv('avg_speed.csv', sep=',', index_col=0)
-    else:
-        avg_speed = pd.read_csv('E:\PycharmProjects\graph_convolution\Data\Xian_city/raw/avg_speed.csv', sep=';', index_col=0)
-    avg_speed = convert_index_to_datetime(avg_speed)
-
-    pos={}
-    colors=[]
-    widths=[]
-
-    #Initial graph drawing parameters
-    for index, row in data.iterrows():
-        pos.update( {row.startNode : (row.lonStart,row.latStart)})
-        pos.update({row.endNode : (row.lonEnd,row.latEnd)})
-        if row.maxSpeed>49:
-            colors.append('green')
-        elif row.maxSpeed>27:
-            colors.append('orange')
-        elif row.maxSpeed>=5:
-            colors.append('red')
-        else:
-            colors.append('k')
-        if row.type == 'primary' or 'primary_link':
-            widths.append(3.0)
-        elif row.type == 'secondary' or 'secondary_link':
-            widths.append(1.5)
-        elif row.type == 'tertiary' or 'tertiary_link':
-            widths.append(1.0)
-        elif row.type == 'trunk' or 'trunk_link':
-            widths.append(2.0)
-        else:
-            widths.append(0.75)
+    avg_speed=load_avgspeed()
 
     #Generate graph
-    G = generate_graph_nodes_roads(data)
+    G= lib.generate_graph_nodes_roads(data)
+    # Initial graph drawing parameters
+    pos, widths, colors = lib.get_graph_params(G)
     #Update colors
-    c=speedtocolor("2016-10-01T00:50:00")
+    # c= lib.speedtocolor("2016-10-01T00:50:00", avg_speed,data)
+
     # Plot graph
     # nx.draw(G, pos=pos, node_size=5, width=widths, edge_color=c, with_labels=False)
     # plt.show()
@@ -288,36 +140,29 @@ if __name__ == '__main__':
     # eventueel hiervoor al self loops introduceren
 
     #Get Adjacency Matrix
-    sparse_adj = nx.to_scipy_sparse_matrix(G).tocoo()
-    sparse_adj_in_coo_format = np.stack([sparse_adj.row, sparse_adj.col])
-    sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
-    # adj=adj.tocoo()
-    # adj = torch.sparse.LongTensor(torch.LongTensor([adj.row.tolist(), adj.col.tolist()]),
-    #                               torch.LongTensor(adj.data.astype(np.int32)))
-    # adj_tensor = torch.tensor(adj)
+    adjacency_matrix = lib.get_adjacency_from_graph(G)
 
     #Define training and test set
+    batch_size=1
     trainingset=avg_speed.loc["2016-10-01":"2016-11-01"]
-    train_data, train_graph = df_to_data(trainingset)
-    trainingtensor=dataframetotensor(trainingset)
+    train_data, train_graph, scaler = lib.df_to_data(trainingset, adjacency_matrix, batch_size)
     testset=avg_speed.loc["2016-11-07":"2016-11-14"]
-    test_data, test_graph = df_to_data(testset)
-    testtensor=dataframetotensor(testset)
+    test_data, test_graph = lib.df_to_data_val(testset, scaler, adjacency_matrix, batch_size)
     valset=avg_speed.loc["2016-11-18":"2016-11-19"]
-    val_data, val_graph= df_to_data(valset)
-    valtensor=dataframetotensor(valset)
+    val_data, val_graph = lib.df_to_data_val(valset, scaler, adjacency_matrix, batch_size)
 
     #Initialize model
     inputsize = avg_speed.shape[1]
     training_losses=[]
     val_losses=[]
+    test_losses=[]
     learning_rate= 1e-4
-    accuracy_check=2
-    # batch_size=50
+    accuracy_check=0
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = Net(train_graph[0]['x'].shape[0]).to(device)
-    # model = Net(batch_size).to(device)
-    # model = STGCN(inputsize,1,1,1)
+
+    #Load model
+    model=loadmodel(model)
     model=model.double()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=5e-4)
     criterion = nn.MSELoss().cuda()
@@ -331,20 +176,33 @@ if __name__ == '__main__':
         optimizer.zero_grad()
         out,epoch_loss = train(train_data)
         training_losses.append(epoch_loss)
-        # loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
-        # loss.backward()
         optimizer.step()
-        if (epoch % accuracy_check ==0):
-            print("Evaluate")
-            with torch.no_grad():
-                model.eval()
-                validation_loss=evaluate(val_data)
-                val_losses.append(validation_loss)
+
+        # if (epoch % accuracy_check ==0):
+        print("Evaluate")
+        with torch.no_grad():
+            model.eval()
+            validation_loss=evaluate(val_data)
+            val_losses.append(validation_loss)
+            test_loss = evaluate(test_data)
+            test_losses.append(test_loss)
         if epoch % 5 == 0:
             torch.save(model.state_dict(), 'checkpoint/epoch_' + str(epoch) + '.tar')
 
     #Save model after training
     savemodel(model)
+
+    # #Test Model
+    # model.eval()
+    # with torch.no_grad():
+    #
+    #Save losses
+    for i in range(len(training_losses)):
+        writer.add_scalar('Loss/train',training_losses[i],i)
+    for i in range(len(val_losses)):
+        writer.add_scalar('Loss/validation',val_losses[i],i)
+    for i in range(len(test_losses)):
+        writer.add_scalar('Loss/test',test_losses[i],i)
 
 
 
