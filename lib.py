@@ -9,6 +9,9 @@ import torch
 from torch_geometric.data import Data, Batch, DataLoader
 import numpy as np
 import matplotlib.pyplot as plt
+import math
+import matplotlib
+from datetime import datetime
 
 supported_road_types = ['primary', 'secondary', 'trunk', 'trunk_link', 'primary_link', 'secondary_link']
 supported_road_types_dict = {type: idx for idx, type in enumerate(supported_road_types)}
@@ -21,9 +24,13 @@ def convert_index_to_datetime(feature):
     return feature
 
 
-def df_to_data(df, edge_matrix, batch_size):
+def df_to_data(df, edge_matrix, batch_size,used_scaler="MinMax"):
     x = df.values  # returns a numpy array
-    min_max_scaler = preprocessing.MinMaxScaler()
+    if used_scaler =="MinMax":
+        min_max_scaler = preprocessing.MinMaxScaler()
+    else:
+        min_max_scaler = preprocessing.StandardScaler()
+
     x_scaled = min_max_scaler.fit_transform(x)
     x_inv=min_max_scaler.inverse_transform(x_scaled)
     df = pd.DataFrame(x_scaled)
@@ -40,11 +47,12 @@ def df_to_data(df, edge_matrix, batch_size):
         # y = y.permute(df.shape[1], 1)  # nodes, features
         data_entry = Data(x=x, y=y, edge_index=edge_matrix)
         data_graphs.append(data_entry)
-    loader = DataLoader(data_graphs, batch_size=batch_size)
-    return loader, data_graphs, min_max_scaler
+    loader = DataLoader(data_graphs, batch_size=batch_size,pin_memory=True)
+    # loader = DataLoader(data_graphs, batch_size=1)
+    return loader, data_graphs , min_max_scaler
 
 
-def df_to_data_val(df, scaler, edge_matrix, batch_size):
+def df_to_data_val(df,scaler, edge_matrix, batch_size):
     x = df.values  # returns a numpy array
     x_scaled = scaler.fit_transform(x)
     df = pd.DataFrame(x_scaled)
@@ -62,6 +70,7 @@ def df_to_data_val(df, scaler, edge_matrix, batch_size):
         data_entry = Data(x=x, y=y, edge_index=edge_matrix)
         data_graphs.append(data_entry)
     loader = DataLoader(data_graphs, batch_size=batch_size)
+    # loader = DataLoader(data_graphs, batch_size=1)
     return loader, data_graphs
 
 
@@ -229,39 +238,373 @@ def get_adjacency_from_graph(graph):
     sparse_adj_in_coo_format_tensor = torch.tensor(sparse_adj_in_coo_format, dtype=torch.long).cuda()
     return sparse_adj_in_coo_format_tensor
 
-def predict_1hour(data, model):
+def predict_1hour(data, model, scaler, df,edge):
     loss_function = nn.MSELoss().cuda()
     losses=[]
     batch = next(iter(data))
     output=batch.x
+    outputs=[]
+    targets=[]
     for i in range(12):
 
         batch.x=output
         output = model(batch)
-        loss = loss_function(output,batch.y)
+        unnormalized_output = torch.tensor(np.transpose(unnormalize_tensor(output, scaler), [0, 1]))
+        unnormalized_target = torch.tensor(np.transpose(unnormalize_tensor(batch.y, scaler), [0, 1]))
+        loss = loss_function(unnormalized_output,unnormalized_target)
         losses.append(loss)
-        target=batch.y
+        outputs.append(unnormalized_output)
+        targets.append(unnormalized_target)
         batch = next(iter(data))
-    return output, target, sum(losses)/len(losses)
 
-def tensor_to_plot(output, target, scaler, graph, pos, widths):
-    output = torch.transpose(output, 0, 1)
-    target = torch.transpose(target, 0, 1)
-    output = output.detach().cpu().numpy()
-    target = target.detach().cpu().numpy()
-    unnormalized_output = scaler.inverse_transform(output)
-    unnormalized_target = scaler.inverse_transform(target)
-    colors_output = update_colors(unnormalized_output)
-    colors_target = update_colors(unnormalized_target)
+    #Plot
+    predictions_speed=[]
+    targets_speed=[]
+    for i in outputs:
+        predictions_speed.append(i[0][edge])
+    for i in targets:
+        targets_speed.append(i[0][edge])
+
+    datetimes= df.axes[0][:12]
+    new_datetimes=[]
+
+    for i in datetimes:
+        date_obj=datetime.strptime(i,"%Y-%m-%d %H:%M:%S")
+        new_datetimes.append(date_obj.strftime("%d-%m %H:%M"))
+    fig = plt.figure()
+    fig.suptitle("Speed over time")
+    plt.ylabel("Speed")
+    plt.xlabel("Time")
+    plt.ylim((0,70))
+    plt.plot(new_datetimes,predictions_speed,label="Prediction")
+    fig.autofmt_xdate()
+    plt.plot(new_datetimes,targets_speed,label="Target")
+    plt.legend()
+
+    return outputs, targets, losses
+def predict(data, model, scaler,hours,df,edge,name):
+    loss_function = nn.MSELoss().cuda()
+    losses = []
+    batch = next(iter(data))
+    output = batch.x
+    outputs = []
+    targets = []
+    rounds=int(hours*12)
+    t=data.dataset[1]
+    # zoek voor moving window
+    count=0
+    for batch in data.dataset:
+        batch.x = output
+        output = model(batch)
+        unnormalized_output = torch.tensor(np.transpose(unnormalize_tensor(output, scaler), [0, 1]))
+        unnormalized_target = torch.tensor(np.transpose(unnormalize_tensor(batch.y, scaler), [0, 1]))
+        loss = loss_function(unnormalized_output, unnormalized_target)
+        losses.append(loss)
+        outputs.append(unnormalized_output)
+        targets.append(unnormalized_target)
+        count+=1
+        if count>=rounds:
+            break
+    # for i in range(rounds):
+    #     batch.x = output
+    #     output = model(batch)
+    #     unnormalized_output = torch.tensor(np.transpose(unnormalize_tensor(output, scaler), [0, 1]))
+    #     unnormalized_target = torch.tensor(np.transpose(unnormalize_tensor(batch.y, scaler), [0, 1]))
+    #     loss = loss_function(unnormalized_output, unnormalized_target)
+    #     losses.append(loss)
+    #     outputs.append(unnormalized_output)
+    #     targets.append(unnormalized_target)
+    #     batch = next(iter(data))
+
+    # Plot
+    predictions_speed = []
+    targets_speed = []
+    for i in outputs:
+        predictions_speed.append(i[0][edge])
+    for i in targets:
+        targets_speed.append(i[0][edge])
+
+    datetimes = df.axes[0][:rounds]
+    new_datetimes = []
+    import matplotlib.dates as mdates
+    for i in datetimes:
+        date_obj = datetime.strptime(i, "%Y-%m-%d %H:%M:%S")
+        new_datetimes.append(date_obj.strftime("%d-%m %H:%M"))
+    if hours >=24:
+        loc=mdates.DayLocator()
+    elif hours>1:
+        loc = mdates.HourLocator()
+    else:
+        loc=mdates.MinuteLocator(30)
+
+
+    # fig, ax = plt.subplots()
+    # ax.plot(new_datetimes, predictions_speed)
+    # ax.xaxis.set_major_locator(mdates.HourLocator(byhour=1))
+    # # ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
+    # # ax.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=10))
+    # fig.autofmt_xdate()
+
+    fig=plt.figure()
+    fig.suptitle("Speed over time for "+str(hours)+"h prediction road 160")
+    plt.ylabel("Speed")
+    plt.xlabel("Time")
+    plt.ylim((0, 70))
+
+    # ax.xaxis.set_minor_locator(mdates.MinuteLocator())
+    # xaxis=plt.axes
+    # print(plt.axes)
+    # plt.axes[0].xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    plt.plot(new_datetimes, predictions_speed, label="Prediction")
+    fig.autofmt_xdate()
+    plt.plot(new_datetimes, targets_speed, label="Target")
+    # ax.xaxis.set_major_locator(mdates.HourLocator(byhour=1))
+    # ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
+    # ax.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=10))
+    # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+    # [i.xaxis.set_major_locator(mdates.HourLocator(1)) for i in fig.axes]
+    # [i.xaxis.set_minor_locator(mdates.MinuteLocator(30)) for i in fig.axes]
+
+    plt.legend()
+    # plt.tight_layout()
+
+
+    plt.savefig('./plots/speed '+datetime.today().strftime("%d-%m-%Y %H-%M")+name+'.png',format='png',bbox_inches='tight')
+    plt.close(fig)
+    return outputs, targets, losses
+
+def predict2(data, model, scaler,rounds,df,roads,name):
+    road_2748 = roads.index('2748')
+    road_160 = roads.index('160')
+    # road_161 = roads.index('161')
+    # road_753 = roads.index('753')
+    # road_92053 = roads.index('92053')
+    # road_274 = roads.index('274')
+    # road_752 = roads.index('752')
+
+
+    loss_function = nn.MSELoss().cuda()
+    losses = []
+    # batch = next(iter(data))
+    # output = batch.x
+    outputs = []
+    targets = []
+    # rounds=int(hours*12)
+    # rounds=1
+    # rolling=0
+    # zoek voor moving window
+    count=0
+    for rolling in range(len(data.dataset)-rounds):
+        output=data.dataset[rolling].x
+        batch=data.dataset[rolling]
+        for i in range(rolling,len(data.dataset)-rounds):
+            batch.x = output
+            output = model(batch)
+            unnormalized_output = torch.tensor(np.transpose(unnormalize_tensor(output, scaler), [0, 1]))
+            unnormalized_target = torch.tensor(np.transpose(unnormalize_tensor(data.dataset[i].y, scaler), [0, 1]))
+            loss = loss_function(unnormalized_output, unnormalized_target)
+            losses.append(loss)
+            count+=1
+            if count>=rounds:
+                outputs.append(unnormalized_output)
+                targets.append(unnormalized_target)
+                # rolling+=1
+                count=0
+                break
+
+    # Plot
+    predictions_speed_160 = []
+    targets_speed_160 = []
+    predictions_speed_2748 = []
+    targets_speed_2748 = []
+    for i in outputs:
+        predictions_speed_160.append(i[0][road_160])
+        predictions_speed_2748.append(i[0][road_2748])
+    for i in targets:
+        targets_speed_160.append(i[0][road_160])
+        targets_speed_2748.append(i[0][road_2748])
+
+    # if rounds==1:
+    #     datetimes = df.axes[0][:rolling+1]
+    # else:
+    datetimes= df.axes[0][:len(outputs)]
+    new_datetimes = []
+    # import matplotlib.dates as mdates
+    for i in datetimes:
+        date_obj = datetime.strptime(i, "%Y-%m-%d %H:%M:%S")
+        new_datetimes.append(date_obj.strftime("%d-%m %H:%M"))
+    # if hours >=24:
+    #     loc=mdates.DayLocator()
+    # elif hours>1:
+    #     loc = mdates.HourLocator()
+    # else:
+    #     loc=mdates.MinuteLocator(30)
+
+
+    # fig, ax = plt.subplots()
+    # ax.plot(new_datetimes, predictions_speed)
+    # ax.xaxis.set_major_locator(mdates.HourLocator(byhour=1))
+    # # ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
+    # # ax.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=10))
+    # fig.autofmt_xdate()
+
+    duration = rounds * 5
+    if duration>=60:
+        label_duration=str(int(duration/60))+"h "
+    else:
+        label_duration=str(int(duration))+ "min "
+
+    fig=plt.figure()
+    fig.suptitle("Speed over time for "+label_duration+"prediction road 160")
+    plt.ylabel("Speed")
+    plt.xlabel("Time")
+    plt.ylim((0, 70))
+
+    # ax.xaxis.set_minor_locator(mdates.MinuteLocator())
+    # xaxis=plt.axes
+    # print(plt.axes)
+    # plt.axes[0].xaxis.set_major_locator(mdates.MinuteLocator(interval=30))
+    plt.plot(new_datetimes, targets_speed_160, label="Target")
+
+
+    plt.plot(new_datetimes, predictions_speed_160, label="Prediction "+label_duration)
+    fig.autofmt_xdate()
+
+    # ax.xaxis.set_major_locator(mdates.HourLocator(byhour=1))
+    # ax.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
+    # ax.xaxis.set_minor_locator(mdates.MinuteLocator(byminute=10))
+    # plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+    # [i.xaxis.set_major_locator(mdates.HourLocator(1)) for i in fig.axes]
+    # [i.xaxis.set_minor_locator(mdates.MinuteLocator(30)) for i in fig.axes]
+
+    plt.legend()
+    # plt.tight_layout()
+
+
+    plt.savefig('./plots/160/speed '+datetime.today().strftime("%d-%m-%Y %H-%M")+name+'.png',format='png',bbox_inches='tight')
+    plt.close(fig)
 
     fig = plt.figure()
-    fig.suptitle('Output graph')
-    nx.draw(graph, pos=pos, node_size=5, width=widths, edge_color=colors_output, with_labels=False)
-    plt.show()
+    fig.suptitle("Speed over time for " + label_duration + "prediction road 2748")
+    plt.ylabel("Speed")
+    plt.xlabel("Time")
+    plt.ylim((0, 70))
 
+    plt.plot(new_datetimes, targets_speed_2748, label="Target")
+    plt.plot(new_datetimes, predictions_speed_2748, label="Prediction " +label_duration)
+    fig.autofmt_xdate()
+    plt.legend()
+
+
+    plt.savefig('./plots/2748/speed ' + datetime.today().strftime("%d-%m-%Y %H-%M") + name + '.png', format='png',
+                bbox_inches='tight')
+    plt.close(fig)
+
+    return outputs, targets, losses
+
+def tensor_to_plot(output, target, scaler, graph, pos, widths,name,Unnormalize=True ):
+
+    if Unnormalize:
+        unnormalized_output = unnormalize_tensor(output,scaler)
+        unnormalized_target = unnormalize_tensor(target,scaler)
+    else:
+        unnormalized_output = output
+        unnormalized_target = target
+
+    #Update graph with new speeds
+    # i=next(iter(graph.nodes()))
+    # n = graph.nodes[i]
+    # count=0
+    # for i in graph.nodes():
+    #     graph.nodes[i]['max_speed'] = unnormalized_output[0][count]
+    #     count+=1
+
+    #Resize
+    output_u_s=np.squeeze(unnormalized_output)
+    target_u_s=np.squeeze(unnormalized_target)
+    g_min=0.0
+    g_max=70.0
+
+    #Output Tensor to RGBA
+    norm=matplotlib.colors.Normalize(vmin=g_min,vmax=g_max)
+    sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=norm)
+    colorvalues = []
+    for i in range(len(output_u_s)):
+        colorVal = sm.to_rgba(output_u_s[i])
+        colorvalues.append(colorVal)
+    #Plot output
     fig = plt.figure()
-    fig.suptitle('Target graph')
-    nx.draw(graph, pos=pos, node_size=5, width=widths, edge_color=colors_target, with_labels=False)
-    plt.show()
+    fig.suptitle('Prediction')
+    nx.draw(graph, pos=pos, node_size=5, width=widths, edge_color=colorvalues, edge_cmap="RdYlGn" , with_labels=False)
+    fig.colorbar(sm)
+    # plt.tight_layout()
+    plt.pause(0.05)
+    plt.show(block=False)
+    now_str=datetime.today().strftime("%d-%m-%Y %H-%M")
+    plt.savefig('./graphs/Output'+ now_str+name+'.png',format='png',bbox_inches='tight')
+    plt.close(fig)
 
+    #Target To RGBA
+    sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=norm)
+    colorvalues = []
+    for i in range(len(target_u_s)):
+        colorVal = sm.to_rgba(target_u_s[i])
+        colorvalues.append(colorVal)
 
+    #Plot Target
+    fig = plt.figure()
+    fig.suptitle('Actual')
+    nx.draw(graph, pos=pos, node_size=5, width=widths, edge_color=colorvalues, edge_cmap="RdYlGn", with_labels=False)
+    fig.colorbar(sm)
+    # plt.tight_layout()
+    plt.pause(0.05)
+    plt.show(block=False)
+    plt.savefig('./graphs/Target' + now_str+name+'.png',format='png',bbox_inches='tight')
+    plt.close(fig)
+
+def unnormalize_tensor(tensor, scaler):
+    tensor=torch.transpose(tensor,0,1)
+    tensor=tensor.detach().cpu().numpy()
+    unnormalized = scaler.inverse_transform(tensor)
+    return unnormalized
+
+def tensor_to_avg_speed(tensor, scaler):
+    unnormalized_tensor = unnormalize_tensor(tensor,scaler)
+    average_speed = sum(unnormalized_tensor)/len(unnormalized_tensor)
+    return average_speed
+
+def get_avg_speed_from_edge(df,edge):
+    return df[edge].mean()
+def unnormalize_loss(loss, scaler):
+    return scaler.inverse_transform(loss.cpu())
+def scale_data(df):
+    x = df.values  # returns a numpy array
+    scaler = preprocessing.MinMaxScaler()
+    x_scaled = scaler.fit_transform(x)
+    df = pd.DataFrame(x_scaled)
+    return df, scaler
+
+def generate_dataset_LSTM(df,seq_len,edge_matrix,batch_size):
+    data_graphs = []
+    x_list=[]
+    y_list=[]
+    count=0
+    for i in range(len(df) - 1):
+
+        x = torch.tensor([df.iloc[i]], dtype=torch.double).cuda()
+        x = torch.transpose(x, 0, 1)
+        # x = x.permute(df.shape[1], 1)  # nodes, features
+        y = torch.tensor([df.iloc[i + 1]], dtype=torch.double).cuda()
+        y = torch.transpose(y, 0, 1)
+        # y = y.permute(df.shape[1], 1)  # nodes, features
+        x_list.append(x)
+        y_list.append(y)
+        count+=1
+        if count>=seq_len:
+            data_entry = Data(x=x_list, y=y_list, edge_index=edge_matrix)
+            data_graphs.append(data_entry)
+            x_list=[]
+            y_list=[]
+            count=0
+    loader = DataLoader(data_graphs, batch_size=batch_size)
+    return loader, data_graphs  # , min_max_scaler
